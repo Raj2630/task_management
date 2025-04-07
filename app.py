@@ -7,6 +7,7 @@ from google.oauth2 import id_token
 from google.auth.transport import requests
 import os
 import logging
+from datetime import datetime
 
 app = FastAPI()
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -84,7 +85,13 @@ async def view_taskboard(request: Request, board_id: str, user_data: tuple = Dep
         board = board_ref.get()
         if not board.exists or email not in board.to_dict().get("users", []):
             raise HTTPException(status_code=404, detail="Board not found or access denied")
-        tasks = [{"id": doc.id, **doc.to_dict()} for doc in board_ref.collection("tasks").stream()]
+        # Fetch tasks and convert completed_at to string
+        tasks = []
+        for doc in board_ref.collection("tasks").stream():
+            task_data = {"id": doc.id, **doc.to_dict()}
+            if "completed_at" in task_data and task_data["completed_at"]:
+                task_data["completed_at"] = task_data["completed_at"].isoformat()  # Convert to ISO string
+            tasks.append(task_data)
         logging.info(f"Viewing taskboard {board_id} for {email}")
         return templates.TemplateResponse("taskboard.html", {
             "request": request, "board": board.to_dict(), "board_id": board_id,
@@ -169,6 +176,32 @@ async def invite_user(board_id: str, request: Request, user_data: tuple = Depend
     except Exception as e:
         logging.error(f"Error inviting user: {str(e)}")
         raise HTTPException(status_code=500, detail="Failed to invite user")
+
+@app.delete("/taskboards/{board_id}/users")
+async def remove_user(board_id: str, request: Request, user_data: tuple = Depends(get_user_data)):
+    uid, email, token = user_data
+    try:
+        board_ref = db.collection("taskboards").document(board_id)
+        board = board_ref.get()
+        if not board.exists or board.to_dict()["creator"] != uid:
+            raise HTTPException(status_code=403, detail="Only creator can remove users")
+        data = await request.json()
+        user_email_to_remove = data.get("email")
+        if not user_email_to_remove or user_email_to_remove not in board.to_dict().get("users", []):
+            raise HTTPException(status_code=400, detail="Invalid or not a member")
+        if user_email_to_remove == email:
+            raise HTTPException(status_code=400, detail="Creator cannot remove themselves")
+        # Unassign tasks for the removed user
+        tasks_ref = board_ref.collection("tasks")
+        tasks = tasks_ref.where("assigned_to", "==", user_email_to_remove).stream()
+        for task in tasks:
+            tasks_ref.document(task.id).update({"assigned_to": None})
+        # Remove user from board
+        board_ref.update({"users": firestore.ArrayRemove([user_email_to_remove])})
+        logging.info(f"Removed {user_email_to_remove} from taskboard {board_id}")
+    except Exception as e:
+        logging.error(f"Error removing user: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to remove user")
 
 @app.patch("/taskboards/{board_id}/tasks/{task_id}")
 async def update_task(board_id: str, task_id: str, request: Request, user_data: tuple = Depends(get_user_data)):
