@@ -1,187 +1,161 @@
-from fastapi import FastAPI, Depends, HTTPException, Request, status
+from fastapi import FastAPI, Request, HTTPException, Depends
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
-from typing import List, Optional
-from datetime import datetime
 from google.cloud import firestore
-from google.oauth2 import service_account
-import json
-import requests
+from google.oauth2 import id_token
+from google.auth.transport import requests
+import os
+import logging
 
-app = FastAPI(title="Task Management System")
+app = FastAPI()
 app.mount("/static", StaticFiles(directory="static"), name="static")
 templates = Jinja2Templates(directory="templates")
+os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = "service-account.json"
+db = firestore.Client()
+logging.basicConfig(level=logging.INFO)
 
-# Load service account credentials
-with open("service-account.json", "r") as f:
-    service_account_info = json.load(f)
-
-credentials = service_account.Credentials.from_service_account_info(
-    service_account_info,
-    scopes=["https://www.googleapis.com/auth/cloud-platform"]
-)
-db = firestore.Client(project="task-management-f337f", credentials=credentials)
-
-# Models
-class TaskBoardCreate(BaseModel):
-    name: str
-
-class TaskCreate(BaseModel):
-    title: str
-    due_date: str  # ISO format: "YYYY-MM-DD"
-    assigned_users: Optional[List[str]] = []
-
-class TaskUpdate(BaseModel):
-    title: Optional[str]
-    due_date: Optional[str]
-    completed: Optional[bool]
-    assigned_users: Optional[List[str]]
-
-class UserAdd(BaseModel):
-    email: str
-
-# Token verification
-async def get_current_user(request: Request):
-    token = request.headers.get("Authorization", "").replace("Bearer ", "")
+async def get_user_data(request: Request) -> tuple:
+    token = request.cookies.get("token") or request.query_params.get("token")
     if not token:
-        token = request.query_params.get("token", "")
-    if not token:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="No token provided")
+        raise HTTPException(status_code=401, detail="Not authenticated")
     try:
-        url = f"https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=AIzaSyCpLrfjk5sRtYhJK7HsYzlEfnqoPKyK5MQ"
-        response = requests.post(url, json={"idToken": token})
-        if response.status_code != 200:
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
-        data = response.json()
-        return data["users"][0]["localId"], token  # Return token along with user ID
-    except Exception as e:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(e))
+        decoded = id_token.verify_firebase_token(token, requests.Request())
+        logging.info(f"Decoded token: {decoded}")
+        uid = decoded.get("sub")  # Firebase uses 'sub' for user ID
+        email = decoded.get("email")
+        if not uid or not email:
+            raise ValueError("Token missing required fields")
+        return uid, email
+    except ValueError as e:
+        logging.error(f"Token verification failed: {str(e)}")
+        raise HTTPException(status_code=401, detail="Invalid token")
 
-# Routes
 @app.get("/", response_class=HTMLResponse)
-async def root(request: Request):
+async def index(request: Request):
     return templates.TemplateResponse("index.html", {"request": request})
 
-@app.post("/taskboards/", response_model=dict)
-async def create_task_board(board: TaskBoardCreate, user_data: tuple = Depends(get_current_user)):
-    current_user, _ = user_data
-    board_ref = db.collection("taskboards").document()
-    board_data = {
-        "name": board.name,
-        "creator": current_user,
-        "users": [current_user],
-        "created_at": datetime.now().isoformat()
-    }
-    board_ref.set(board_data)
-    return {"id": board_ref.id, **board_data}
+@app.get("/taskboards/", response_model=list)
+async def list_taskboards(user_data: tuple = Depends(get_user_data)):
+    uid, email = user_data
+    boards_ref = db.collection("taskboards")
+    query = boards_ref.where("users", "array_contains", email).stream()
+    boards = [{"id": doc.id, **doc.to_dict(), "is_creator": doc.to_dict()["creator"] == uid} for doc in query]
+    return boards
 
-@app.get("/taskboards/", response_model=List[dict])
-async def list_task_boards(user_data: tuple = Depends(get_current_user)):
-    current_user, _ = user_data
-    boards = db.collection("taskboards").where("users", "array_contains", current_user).stream()
-    return [{"id": board.id, **board.to_dict()} for board in boards]
+@app.post("/taskboards/")
+async def create_taskboard(request: Request, user_data: tuple = Depends(get_user_data)):
+    uid, email = user_data
+    data = await request.json()
+    name = data.get("name")
+    if not name or db.collection("taskboards").where("name", "==", name).where("creator", "==", uid).get():
+        raise HTTPException(status_code=400, detail="Invalid or duplicate board name")
+    board_ref = db.collection("taskboards").document()
+    board_ref.set({"name": name, "creator": uid, "users": [email]})
+    return {"id": board_ref.id, "name": name}
 
 @app.get("/taskboard/{board_id}", response_class=HTMLResponse)
-async def view_task_board(board_id: str, request: Request, user_data: tuple = Depends(get_current_user)):
-    current_user, token = user_data
+async def view_taskboard(request: Request, board_id: str, user_data: tuple = Depends(get_user_data)):
+    uid, email = user_data
     board_ref = db.collection("taskboards").document(board_id)
     board = board_ref.get()
-    if not board.exists or current_user not in board.to_dict()["users"]:
+    if not board.exists or email not in board.to_dict().get("users", []):
         raise HTTPException(status_code=404, detail="Board not found or access denied")
-    tasks = board_ref.collection("tasks").stream()
-    task_list = [{"id": task.id, **task.to_dict()} for task in tasks]
+    tasks = [{"id": doc.id, **doc.to_dict()} for doc in board_ref.collection("tasks").stream()]
     return templates.TemplateResponse("taskboard.html", {
-        "request": request,
-        "board": board.to_dict(),
-        "tasks": task_list,
-        "board_id": board_id,
-        "is_creator": board.to_dict()["creator"] == current_user,
-        "token": token  # Pass token to template
+        "request": request, "board": board.to_dict(), "board_id": board_id,
+        "tasks": tasks, "is_creator": board.to_dict()["creator"] == uid, "token": request.query_params.get("token")
     })
 
-@app.post("/taskboards/{board_id}/tasks/", response_model=dict)
-async def create_task(board_id: str, task: TaskCreate, user_data: tuple = Depends(get_current_user)):
-    current_user, _ = user_data
+@app.post("/taskboards/{board_id}/tasks/")
+async def add_task(board_id: str, request: Request, user_data: tuple = Depends(get_user_data)):
+    uid, email = user_data
     board_ref = db.collection("taskboards").document(board_id)
-    board = board_ref.get()
-    if not board.exists or current_user not in board.to_dict()["users"]:
-        raise HTTPException(status_code=403, detail="Access denied")
+    if not board_ref.get().exists or email not in board_ref.get().to_dict().get("users", []):
+        raise HTTPException(status_code=404, detail="Board not found or access denied")
+    data = await request.json()
+    title, due_date, assigned_to = data.get("title"), data.get("due_date"), data.get("assigned_to")
+    if not title or not due_date or db.collection("taskboards").document(board_id).collection("tasks").where("title", "==", title).get():
+        raise HTTPException(status_code=400, detail="Invalid or duplicate task")
     task_ref = board_ref.collection("tasks").document()
-    task_data = {
-        "title": task.title,
-        "due_date": task.due_date,
-        "completed": False,
-        "completed_at": None,
-        "assigned_users": task.assigned_users or [],
-        "created_at": datetime.now().isoformat()
-    }
-    task_ref.set(task_data)
-    return {"id": task_ref.id, **task_data}
+    task_ref.set({"title": title, "due_date": due_date, "completed": False, "assigned_to": assigned_to})
+    return {"id": task_ref.id}
 
-@app.patch("/taskboards/{board_id}/tasks/{task_id}", response_model=dict)
-async def update_task(board_id: str, task_id: str, task: TaskUpdate, user_data: tuple = Depends(get_current_user)):
-    current_user, _ = user_data
+@app.patch("/taskboards/{board_id}")
+async def rename_taskboard(board_id: str, request: Request, user_data: tuple = Depends(get_user_data)):
+    uid, email = user_data
     board_ref = db.collection("taskboards").document(board_id)
     board = board_ref.get()
-    if not board.exists or current_user not in board.to_dict()["users"]:
-        raise HTTPException(status_code=403, detail="Access denied")
+    if not board.exists or board.to_dict()["creator"] != uid:
+        raise HTTPException(status_code=403, detail="Only creator can rename")
+    data = await request.json()
+    name = data.get("name")
+    if not name or db.collection("taskboards").where("name", "==", name).where("creator", "==", uid).get():
+        raise HTTPException(status_code=400, detail="Invalid or duplicate name")
+    board_ref.update({"name": name})
+    return {"name": name}
+
+@app.delete("/taskboards/{board_id}")
+async def delete_taskboard(board_id: str, user_data: tuple = Depends(get_user_data)):
+    uid, email = user_data
+    board_ref = db.collection("taskboards").document(board_id)
+    board = board_ref.get()
+    if not board.exists or board.to_dict()["creator"] != uid:
+        raise HTTPException(status_code=403, detail="Only creator can delete")
+    if len(board.to_dict().get("users", [])) > 1 or board_ref.collection("tasks").get():
+        raise HTTPException(status_code=400, detail="Remove all users and tasks first")
+    board_ref.delete()
+
+@app.post("/taskboards/{board_id}/users")
+async def invite_user(board_id: str, request: Request, user_data: tuple = Depends(get_user_data)):
+    uid, email = user_data
+    board_ref = db.collection("taskboards").document(board_id)
+    board = board_ref.get()
+    if not board.exists or board.to_dict()["creator"] != uid:
+        raise HTTPException(status_code=403, detail="Only creator can invite")
+    data = await request.json()
+    new_user_email = data.get("email")
+    if not new_user_email or new_user_email in board.to_dict().get("users", []):
+        raise HTTPException(status_code=400, detail="Invalid or already added user")
+    users_ref = db.collection("users").where("email", "==", new_user_email).get()
+    if not users_ref:
+        raise HTTPException(status_code=404, detail="User not found")
+    board_ref.update({"users": firestore.ArrayUnion([new_user_email])})
+
+@app.patch("/taskboards/{board_id}/tasks/{task_id}")
+async def update_task(board_id: str, task_id: str, request: Request, user_data: tuple = Depends(get_user_data)):
+    uid, email = user_data
+    board_ref = db.collection("taskboards").document(board_id)
+    if not board_ref.get().exists or email not in board_ref.get().to_dict().get("users", []):
+        raise HTTPException(status_code=404, detail="Board not found or access denied")
     task_ref = board_ref.collection("tasks").document(task_id)
-    task_doc = task_ref.get()
-    if not task_doc.exists:
+    if not task_ref.get().exists:
         raise HTTPException(status_code=404, detail="Task not found")
-    update_data = {}
-    if task.title is not None:
-        update_data["title"] = task.title
-    if task.due_date is not None:
-        update_data["due_date"] = task.due_date
-    if task.completed is not None:
-        update_data["completed"] = task.completed
-        update_data["completed_at"] = datetime.now().isoformat() if task.completed else None
-    if task.assigned_users is not None:
-        update_data["assigned_users"] = task.assigned_users
-    task_ref.update(update_data)
-    return {"id": task_id, **task_ref.get().to_dict()}
+    data = await request.json()
+    updates = {}
+    if "title" in data and data["title"]:
+        if db.collection("taskboards").document(board_id).collection("tasks").where("title", "==", data["title"]).get():
+            raise HTTPException(status_code=400, detail="Duplicate task title")
+        updates["title"] = data["title"]
+    if "due_date" in data and data["due_date"]:
+        updates["due_date"] = data["due_date"]
+    if "completed" in data:
+        updates["completed"] = data["completed"]
+        if data["completed"]:
+            updates["completed_at"] = firestore.SERVER_TIMESTAMP
+        else:
+            updates["completed_at"] = None
+    if "assigned_to" in data:
+        updates["assigned_to"] = data["assigned_to"]
+    task_ref.update(updates)
 
-@app.delete("/taskboards/{board_id}/tasks/{task_id}", status_code=204)
-async def delete_task(board_id: str, task_id: str, user_data: tuple = Depends(get_current_user)):
-    current_user, _ = user_data
+@app.delete("/taskboards/{board_id}/tasks/{task_id}")
+async def delete_task(board_id: str, task_id: str, user_data: tuple = Depends(get_user_data)):
+    uid, email = user_data
     board_ref = db.collection("taskboards").document(board_id)
-    board = board_ref.get()
-    if not board.exists or current_user not in board.to_dict()["users"]:
-        raise HTTPException(status_code=403, detail="Access denied")
+    if not board_ref.get().exists or email not in board_ref.get().to_dict().get("users", []):
+        raise HTTPException(status_code=404, detail="Board not found or access denied")
     task_ref = board_ref.collection("tasks").document(task_id)
     if not task_ref.get().exists:
         raise HTTPException(status_code=404, detail="Task not found")
     task_ref.delete()
-    return
-
-@app.patch("/taskboards/{board_id}", response_model=dict)
-async def rename_task_board(board_id: str, board: TaskBoardCreate, user_data: tuple = Depends(get_current_user)):
-    current_user, _ = user_data
-    board_ref = db.collection("taskboards").document(board_id)
-    board_doc = board_ref.get()
-    if not board_doc.exists or current_user not in board_doc.to_dict()["users"]:
-        raise HTTPException(status_code=404, detail="Board not found or access denied")
-    if board_doc.to_dict()["creator"] != current_user:
-        raise HTTPException(status_code=403, detail="Only the creator can rename the board")
-    board_ref.update({"name": board.name})
-    return {"id": board_id, **board_ref.get().to_dict()}
-
-@app.delete("/taskboards/{board_id}", status_code=204)
-async def delete_task_board(board_id: str, user_data: tuple = Depends(get_current_user)):
-    current_user, _ = user_data
-    board_ref = db.collection("taskboards").document(board_id)
-    board = board_ref.get()
-    if not board.exists or current_user not in board.to_dict()["users"]:
-        raise HTTPException(status_code=404, detail="Board not found or access denied")
-    if board.to_dict()["creator"] != current_user:
-        raise HTTPException(status_code=403, detail="Only the creator can delete the board")
-    tasks = board_ref.collection("tasks").stream()
-    if any(tasks):
-        raise HTTPException(status_code=400, detail="Cannot delete board with existing tasks")
-    if len(board.to_dict()["users"]) > 1:
-        raise HTTPException(status_code=400, detail="Cannot delete board with non-owning users")
-    board_ref.delete()
-    return

@@ -4,22 +4,36 @@
     <meta charset="UTF-8">
     <title>Task Management</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        header { background-color: #343a40; color: white; padding: 1rem; }
+        footer { background-color: #f8f9fa; padding: 1rem; text-align: center; position: fixed; bottom: 0; width: 100%; }
+        .container { margin-bottom: 100px; } /* Avoid footer overlap */
+    </style>
 </head>
-<body class="p-3">
-    <div id="login-box">
-        <h2>Login / Sign Up</h2>
-        <input type="email" id="email" class="form-control mb-2" placeholder="Email">
-        <input type="password" id="password" class="form-control mb-2" placeholder="Password">
-        <button id="login" class="btn btn-primary mb-2">Login</button>
-        <button id="sign-up" class="btn btn-secondary mb-2">Sign Up</button>
+<body>
+    <header class="d-flex justify-content-between align-items-center">
+        <h1 class="h4">Task Management System</h1>
+        <div id="user-info"></div>
+    </header>
+    <div class="container mt-4">
+        <div id="login-box">
+            <h2>Login / Sign Up</h2>
+            <input type="email" id="email" class="form-control mb-2" placeholder="Email">
+            <input type="password" id="password" class="form-control mb-2" placeholder="Password">
+            <button id="login" class="btn btn-primary mb-2">Login</button>
+            <button id="sign-up" class="btn btn-secondary mb-2">Sign Up</button>
+        </div>
+        <div id="authenticated-box" hidden>
+            <button id="sign-out" class="btn btn-danger mb-2">Sign Out</button>
+            <h2>Create Task Board</h2>
+            <input type="text" id="board-name" class="form-control mb-2" placeholder="Board Name">
+            <button id="create-board" class="btn btn-primary mb-2">Create Board</button>
+        </div>
+        <div id="task-boards" class="mt-3"></div>
     </div>
-    <div id="authenticated-box" hidden>
-        <button id="sign-out" class="btn btn-danger mb-2">Sign Out</button>
-        <h2>Create Task Board</h2>
-        <input type="text" id="board-name" class="form-control mb-2" placeholder="Board Name">
-        <button id="create-board" class="btn btn-primary mb-2">Create Board</button>
-    </div>
-    <div id="task-boards" class="mt-3"></div>
+    <footer>
+        <p>&copy; 2025 Task Management System. All rights reserved.</p>
+    </footer>
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
     <script type="module" src="/static/firebase-login.js"></script>
@@ -27,18 +41,18 @@
         window.addEventListener("load", () => {
             const token = parseCookieToken(document.cookie);
             console.log("Index loaded, token:", token);
-
             if (token) {
                 document.getElementById("authenticated-box").hidden = false;
+                document.getElementById("user-info").innerHTML = `<span class="badge bg-light text-dark">Logged in</span>`;
                 fetchTaskBoards(token);
             } else {
-                console.log("No token, showing login box");
+                document.getElementById("user-info").innerHTML = `<span class="badge bg-secondary">Not logged in</span>`;
             }
 
             const createBoardButton = document.getElementById("create-board");
             if (createBoardButton) {
                 createBoardButton.addEventListener("click", () => {
-                    const boardName = document.getElementById("board-name").value;
+                    const boardName = document.getElementById("board-name").value.trim();
                     if (!boardName) {
                         alert("Please enter a board name");
                         return;
@@ -48,63 +62,39 @@
                         alert("Not authenticated");
                         return;
                     }
-                    console.log("Creating board:", boardName);
                     fetch("/taskboards/", {
                         method: "POST",
-                        headers: {
-                            "Authorization": `Bearer ${token}`,
-                            "Content-Type": "application/json"
-                        },
+                        headers: { "Authorization": `Bearer ${token}`, "Content-Type": "application/json" },
                         body: JSON.stringify({ name: boardName })
                     })
                     .then(response => {
-                        console.log("Create board response:", response.status);
                         if (!response.ok) throw new Error(`HTTP error: ${response.status}`);
                         return response.json();
                     })
-                    .then(data => {
-                        console.log("Board created:", data);
-                        fetchTaskBoards(token);
-                    })
-                    .catch(error => {
-                        console.error("Error creating board:", error.message);
-                        alert("Failed to create board: " + error.message);
-                    });
+                    .then(data => fetchTaskBoards(token))
+                    .catch(error => alert("Failed to create board: " + error.message));
                 });
-            } else {
-                console.error("Create board button not found");
             }
         });
 
         function fetchTaskBoards(token) {
-            console.log("Fetching task boards with token:", token);
-            fetch("/taskboards/", {
-                headers: { "Authorization": `Bearer ${token}` }
-            })
+            fetch("/taskboards/", { headers: { "Authorization": `Bearer ${token}` } })
             .then(response => {
-                console.log("Task boards response:", response.status);
                 if (!response.ok) throw new Error(`HTTP error: ${response.status}`);
                 return response.json();
             })
             .then(boards => {
-                console.log("Boards received:", boards);
                 const taskBoardsDiv = document.getElementById("task-boards");
-                taskBoardsDiv.innerHTML = boards.length > 0 ? boards.map(board => {
-                    // Use creator field from backend instead of auth.currentUser
-                    const isCreator = board.creator === boards[0].users[0]; // Simplistic check; adjust if needed
-                    return `
-                        <div class="card mb-2">
-                            <div class="card-body">
-                                ${board.name} 
-                                (Creator: ${isCreator ? "You" : "Other"})
-                                <a href="/taskboard/${board.id}?token=${token}" class="btn btn-sm btn-primary">View</a>
-                            </div>
+                taskBoardsDiv.innerHTML = boards.length > 0 ? boards.map(board => `
+                    <div class="card mb-2">
+                        <div class="card-body d-flex justify-content-between align-items-center">
+                            <span>${board.name} ${board.is_creator ? '<span class="badge bg-success">Creator</span>' : ''}</span>
+                            <a href="/taskboard/${board.id}?token=${token}" class="btn btn-sm btn-primary">View</a>
                         </div>
-                    `;
-                }).join("") : "<p>No task boards available.</p>";
+                    </div>
+                `).join("") : "<p>No task boards available.</p>";
             })
             .catch(error => {
-                console.error("Error fetching boards:", error.message);
                 document.getElementById("task-boards").innerHTML = "<p>Failed to load task boards: " + error.message + "</p>";
             });
         }
