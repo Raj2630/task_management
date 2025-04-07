@@ -167,18 +167,18 @@ async def invite_user(board_id: str, request: Request, user_data: tuple = Depend
         if not new_user_email or new_user_email in board.to_dict().get("users", []):
             raise HTTPException(status_code=400, detail="Invalid or already added user")
         
-        # Check if the user exists in the users collection
+        # Checking if the user exists in the users collection
         users_ref = db.collection("users").where("email", "==", new_user_email).get()
         if not users_ref:
             logging.warning(f"User {new_user_email} not found in users collection")
             raise HTTPException(status_code=404, detail=f"User {new_user_email} not found. Please ensure they have signed up.")
         
-        # Add the user to the taskboard
+        # Adding the user to the taskboard
         board_ref.update({"users": firestore.ArrayUnion([new_user_email])})
         logging.info(f"Invited {new_user_email} to taskboard {board_id}")
         return {"message": f"User {new_user_email} invited successfully"}
     except HTTPException as e:
-        # Pass through HTTP exceptions directly with their intended status code
+        # Passing through HTTP exceptions directly with their intended status code
         raise e
     except Exception as e:
         logging.error(f"Unexpected error inviting user: {str(e)}")
