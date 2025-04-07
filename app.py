@@ -14,7 +14,6 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 templates = Jinja2Templates(directory="templates")
 logging.basicConfig(level=logging.INFO)
 
-# Verify service account file exists and is correctly configured
 SERVICE_ACCOUNT_PATH = "service-account.json"
 if not os.path.exists(SERVICE_ACCOUNT_PATH):
     logging.error(f"Service account file not found at: {SERVICE_ACCOUNT_PATH}")
@@ -35,11 +34,11 @@ async def get_user_data(request: Request) -> tuple:
     try:
         decoded = id_token.verify_firebase_token(token, requests.Request())
         logging.info(f"Decoded token: {decoded}")
-        uid = decoded.get("sub")  # Firebase uses 'sub' for user ID
+        uid = decoded.get("sub")
         email = decoded.get("email")
         if not uid or not email:
             raise ValueError("Token missing required fields")
-        return uid, email, token  # Pass token along for endpoints
+        return uid, email, token
     except ValueError as e:
         logging.error(f"Token verification failed: {str(e)}")
         raise HTTPException(status_code=401, detail="Invalid token")
@@ -85,12 +84,11 @@ async def view_taskboard(request: Request, board_id: str, user_data: tuple = Dep
         board = board_ref.get()
         if not board.exists or email not in board.to_dict().get("users", []):
             raise HTTPException(status_code=404, detail="Board not found or access denied")
-        # Fetch tasks and convert completed_at to string
         tasks = []
         for doc in board_ref.collection("tasks").stream():
             task_data = {"id": doc.id, **doc.to_dict()}
             if "completed_at" in task_data and task_data["completed_at"]:
-                task_data["completed_at"] = task_data["completed_at"].isoformat()  # Convert to ISO string
+                task_data["completed_at"] = task_data["completed_at"].isoformat()
             tasks.append(task_data)
         logging.info(f"Viewing taskboard {board_id} for {email}")
         return templates.TemplateResponse("taskboard.html", {
@@ -168,14 +166,23 @@ async def invite_user(board_id: str, request: Request, user_data: tuple = Depend
         new_user_email = data.get("email")
         if not new_user_email or new_user_email in board.to_dict().get("users", []):
             raise HTTPException(status_code=400, detail="Invalid or already added user")
+        
+        # Check if the user exists in the users collection
         users_ref = db.collection("users").where("email", "==", new_user_email).get()
         if not users_ref:
-            raise HTTPException(status_code=404, detail="User not found")
+            logging.warning(f"User {new_user_email} not found in users collection")
+            raise HTTPException(status_code=404, detail=f"User {new_user_email} not found. Please ensure they have signed up.")
+        
+        # Add the user to the taskboard
         board_ref.update({"users": firestore.ArrayUnion([new_user_email])})
         logging.info(f"Invited {new_user_email} to taskboard {board_id}")
+        return {"message": f"User {new_user_email} invited successfully"}
+    except HTTPException as e:
+        # Pass through HTTP exceptions directly with their intended status code
+        raise e
     except Exception as e:
-        logging.error(f"Error inviting user: {str(e)}")
-        raise HTTPException(status_code=500, detail="Failed to invite user")
+        logging.error(f"Unexpected error inviting user: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to invite user due to an unexpected error")
 
 @app.delete("/taskboards/{board_id}/users")
 async def remove_user(board_id: str, request: Request, user_data: tuple = Depends(get_user_data)):
@@ -191,12 +198,10 @@ async def remove_user(board_id: str, request: Request, user_data: tuple = Depend
             raise HTTPException(status_code=400, detail="Invalid or not a member")
         if user_email_to_remove == email:
             raise HTTPException(status_code=400, detail="Creator cannot remove themselves")
-        # Unassign tasks for the removed user
         tasks_ref = board_ref.collection("tasks")
         tasks = tasks_ref.where("assigned_to", "==", user_email_to_remove).stream()
         for task in tasks:
             tasks_ref.document(task.id).update({"assigned_to": None})
-        # Remove user from board
         board_ref.update({"users": firestore.ArrayRemove([user_email_to_remove])})
         logging.info(f"Removed {user_email_to_remove} from taskboard {board_id}")
     except Exception as e:
