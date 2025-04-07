@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>{{ board.name }} - Task Board</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+</head>
+<body class="p-3">
+    <h1>{{ board.name }}</h1>
+    <p>Creator: {{ "You" if is_creator else "Other" }}</p>
+    {% if is_creator %}
+    <button id="rename-board" class="btn btn-secondary">Rename Board</button>
+    <button id="delete-board" class="btn btn-danger">Delete Board</button>
+    {% endif %}
+    <div id="tasks">
+        {% for task in tasks %}
+        <div class="card mb-2">
+            <div class="card-body">
+                <input type="checkbox" id="task-{{ task.id }}" {% if task.completed %}checked{% endif %} onchange="toggleTask('{{ board_id }}', '{{ task.id }}', this.checked)">
+                <label for="task-{{ task.id }}">{{ task.title }}</label> (Due: {{ task.due_date }})
+                {% if task.completed_at %} - Completed at: {{ task.completed_at }}{% endif %}
+                <button class="btn btn-sm btn-warning" onclick="editTask('{{ board_id }}', '{{ task.id }}')">Edit</button>
+                <button class="btn btn-sm btn-danger" onclick="deleteTask('{{ board_id }}', '{{ task.id }}')">Delete</button>
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+    <button id="add-task" class="btn btn-primary">Add Task</button>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.3.1/firebase-app.js";
+        import { getAuth } from "https://www.gstatic.com/firebasejs/11.3.1/firebase-auth.js";
+
+        // Firebase Configuration (same as firebase-login.js)
+        const firebaseConfig = {
+            apiKey: "AIzaSyCpLrfjk5sRtYhJK7HsYzlEfnqoPKyK5MQ",
+            authDomain: "task-management-f337f.firebaseapp.com",
+            projectId: "task-management-f337f",
+            storageBucket: "task-management-f337f.firebasestorage.app",
+            messagingSenderId: "992705590111",
+            appId: "1:992705590111:web:c5bc2e0e31a823211ebcea",
+            measurementId: "G-DDBFZHSVQP"
+        };
+
+        // Initialize Firebase
+        const app = initializeApp(firebaseConfig);
+        console.log("Firebase initialized");
+
+        document.addEventListener("DOMContentLoaded", () => {
+            console.log("DOMContentLoaded fired");
+            const auth = getAuth(app);
+            const token = "{{ token | safe }}";
+            const isCreator = {{ is_creator | tojson }};
+            console.log("Token:", token, "isCreator:", isCreator);
+
+            const addTaskBtn = document.getElementById("add-task");
+            const renameBoardBtn = document.getElementById("rename-board");
+            const deleteBoardBtn = document.getElementById("delete-board");
+
+            console.log("Buttons found:", {
+                addTaskBtn: !!addTaskBtn,
+                renameBoardBtn: !!renameBoardBtn,
+                deleteBoardBtn: !!deleteBoardBtn
+            });
+
+            if (!addTaskBtn) console.error("Add Task button not found");
+            if (isCreator && !renameBoardBtn) console.error("Rename Board button not found");
+            if (isCreator && !deleteBoardBtn) console.error("Delete Board button not found");
+
+            addTaskBtn.addEventListener("click", () => {
+                console.log("Add Task button clicked");
+                const title = prompt("Task title:");
+                const due_date = prompt("Due date (YYYY-MM-DD):");
+                if (title && due_date) {
+                    console.log("Sending POST to add task:", { title, due_date });
+                    fetch(`/taskboards/{{ board_id }}/tasks/`, {
+                        method: "POST",
+                        headers: {
+                            "Authorization": `Bearer ${token}`,
+                            "Content-Type": "application/json"
+                        },
+                        body: JSON.stringify({ title: title, due_date: due_date })
+                    })
+                    .then(response => {
+                        console.log("Add task response:", response.status, response.statusText);
+                        if (!response.ok) throw new Error(`Add failed: ${response.status}`);
+                        return response.json();
+                    })
+                    .then(data => {
+                        console.log("Task added successfully:", data);
+                        window.location.reload();
+                    })
+                    .catch(error => console.error("Error adding task:", error.message));
+                } else {
+                    console.log("Add task cancelled or invalid input");
+                }
+            });
+
+            renameBoardBtn?.addEventListener("click", () => {
+                console.log("Rename Board button clicked");
+                const newName = prompt("New board name:");
+                if (newName) {
+                    console.log("Sending PATCH to rename board:", newName);
+                    fetch(`/taskboards/{{ board_id }}`, {
+                        method: "PATCH",
+                        headers: {
+                            "Authorization": `Bearer ${token}`,
+                            "Content-Type": "application/json"
+                        },
+                        body: JSON.stringify({ name: newName })
+                    })
+                    .then(response => {
+                        console.log("Rename board response:", response.status, response.statusText);
+                        if (!response.ok) throw new Error(`Rename failed: ${response.status}`);
+                        return response.json();
+                    })
+                    .then(data => {
+                        console.log("Board renamed successfully:", data);
+                        window.location.reload();
+                    })
+                    .catch(error => console.error("Error renaming board:", error.message));
+                } else {
+                    console.log("Rename board cancelled");
+                }
+            });
+
+            deleteBoardBtn?.addEventListener("click", () => {
+                console.log("Delete Board button clicked");
+                if (confirm("Delete board and all tasks?")) {
+                    console.log("Sending DELETE to delete board:", "{{ board_id }}");
+                    fetch(`/taskboards/{{ board_id }}`, {
+                        method: "DELETE",
+                        headers: { "Authorization": `Bearer ${token}` }
+                    })
+                    .then(response => {
+                        console.log("Delete board response:", response.status, response.statusText);
+                        if (!response.ok) throw new Error(`Delete failed: ${response.status}`);
+                        window.location.href = "/";
+                    })
+                    .catch(error => console.error("Error deleting board:", error.message));
+                } else {
+                    console.log("Delete board cancelled");
+                }
+            });
+
+            window.toggleTask = function(boardId, taskId, completed) {
+                console.log("Toggle Task called:", taskId, completed);
+                fetch(`/taskboards/${boardId}/tasks/${taskId}`, {
+                    method: "PATCH",
+                    headers: { "Authorization": `Bearer ${token}`, "Content-Type": "application/json" },
+                    body: JSON.stringify({ completed: completed })
+                })
+                .then(response => {
+                    console.log("Toggle task response:", response.status, response.statusText);
+                    if (!response.ok) throw new Error(`Toggle failed: ${response.status}`);
+                    return response.json();
+                })
+                .then(data => console.log("Task toggled:", data))
+                .catch(error => console.error("Error toggling task:", error.message));
+            };
+
+            window.editTask = function(boardId, taskId) {
+                console.log("Edit Task called:", taskId);
+                const title = prompt("New title:");
+                const due_date = prompt("New due date (YYYY-MM-DD):");
+                if (title || due_date) {
+                    console.log("Sending PATCH to edit task:", { title, due_date });
+                    fetch(`/taskboards/${boardId}/tasks/${taskId}`, {
+                        method: "PATCH",
+                        headers: { "Authorization": `Bearer ${token}`, "Content-Type": "application/json" },
+                        body: JSON.stringify({ title: title, due_date: due_date })
+                    })
+                    .then(response => {
+                        console.log("Edit task response:", response.status, response.statusText);
+                        if (!response.ok) throw new Error(`Edit failed: ${response.status}`);
+                        return response.json();
+                    })
+                    .then(data => {
+                        console.log("Task edited:", data);
+                        window.location.reload();
+                    })
+                    .catch(error => console.error("Error editing task:", error.message));
+                }
+            };
+
+            window.deleteTask = function(boardId, taskId) {
+                console.log("Delete Task called:", taskId);
+                if (confirm("Are you sure?")) {
+                    console.log("Sending DELETE to delete task:", taskId);
+                    fetch(`/taskboards/${boardId}/tasks/${taskId}`, {
+                        method: "DELETE",
+                        headers: { "Authorization": `Bearer ${token}` }
+                    })
+                    .then(response => {
+                        console.log("Delete task response:", response.status, response.statusText);
+                        if (!response.ok) throw new Error(`Delete failed: ${response.status}`);
+                        window.location.reload();
+                    })
+                    .catch(error => console.error("Error deleting task:", error.message));
+                }
+            };
+        });
+    </script>
+</body>
+</html>
